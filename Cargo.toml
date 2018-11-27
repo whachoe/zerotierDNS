@@ -1,0 +1,6 @@
+[package]
+name = "zerotier-dns"
+version = "0.1.0"
+authors = ["Whachoe <whachoe@gmail.com>"]
+
+[dependencies]
