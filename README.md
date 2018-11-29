@@ -10,7 +10,7 @@ These instructions will get you a copy of the project up and running on your loc
 
 Make sure to have [Rust](https://www.rust-lang.org/en-US/install.html) and [Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html) installed.
 
-### Installing
+### Building
 
 ```
 $ git clone https://github.com/whachoe/zerotierDNS
