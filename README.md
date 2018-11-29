@@ -12,18 +12,14 @@ Make sure to have [Rust](https://www.rust-lang.org/en-US/install.html) and [Carg
 
 ### Installing
 
-A step by step series of examples that tell you how to get a development env running
-
-Say what the step will be
-
 ```
-git clone https://github.com/whachoe/zerotierDNS
-cargo build --release
-cargo run -- --help
+$ git clone https://github.com/whachoe/zerotierDNS
+$ cargo build --release
+$ cargo run -- --help
 ```
 
 ```
-cargo run -- -h
+$ cargo run -- -h
 ZerotierDNS 1.0.0
 Whachoe <whachoe@gmail.com>
 Dns-server for zerotier networks. Resolves names of devices to their IP
