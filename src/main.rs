@@ -10,8 +10,6 @@ use json::JsonValue;
 use std::net::UdpSocket;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
-use std::io::Read;
-use std::io::{Result};
 use std::str::FromStr;
 
 mod BytePacketBuffer;
@@ -24,8 +22,7 @@ mod ResultCode;
 
 // If you want to use this server as a proxy-dns-server to an upstream link, use this function
 #[allow(dead_code)]
-fn proxy_lookup(qname: &str, qtype: QueryType::QueryType) -> Result<DnsPacket::DnsPacket> {
-    let server = ("8.8.8.8", 53);
+fn proxy_lookup(qname: &str, qtype: QueryType::QueryType, server: (&str, u16)) -> std::io::Result<DnsPacket::DnsPacket> {
     let socket = UdpSocket::bind(("0.0.0.0", 43210))?;
 
     let mut packet = DnsPacket::DnsPacket::new();
@@ -48,7 +45,7 @@ fn proxy_lookup(qname: &str, qtype: QueryType::QueryType) -> Result<DnsPacket::D
 // Lookup the qname in zerotier api and return the IP
 // todo: Implement local caching of the API-response
 #[allow(dead_code)]
-fn lookup(qname: &str, zerotier_token: &str, zerotier_network_id: &str) -> Result<DnsPacket::DnsPacket> {
+fn lookup(qname: &str, zerotier_token: &str, zerotier_network_id: &str) -> std::result::Result<DnsPacket::DnsPacket, &'static str> {
     let zerotier_url = format!("https://my.zerotier.com/api/network/{network_id}/member", network_id = zerotier_network_id);
     let auth_header = format!("Bearer {token}", token = zerotier_token);
 
@@ -72,6 +69,7 @@ fn lookup(qname: &str, zerotier_token: &str, zerotier_network_id: &str) -> Resul
                 println!("Found: {} -> {}", name, ip);
 
                 if name.eq(qname) {
+                    println!("Matched: {} -> {}", name, ip);
                     found = true;
                     break;
                 }
@@ -89,16 +87,18 @@ fn lookup(qname: &str, zerotier_token: &str, zerotier_network_id: &str) -> Resul
         };
         packet.header.answers = 1;
         packet.answers.push(record);
+
+        return Ok(packet)
     }
 
-    Ok(packet)
+    Err("Host not found")
 }
 
 fn main() {
     let matches = App::new("ZerotierDNS")
                         .version("1.0.0")
                         .author("Whachoe <whachoe@gmail.com>")
-                        .about("Dns-server for zerotier networks. Resolves names of clients to their IP")
+                        .about("Dns-server for zerotier networks. Resolves names of devices to their IP")
                         .arg(Arg::with_name("zerotier-token")
                             .short("t")
                             .long("token")
@@ -120,11 +120,20 @@ fn main() {
                             .help("If left out, the app will bind on all available IP's. It's more secure to bind the IP of your local zerotier-client.")
                             .takes_value(true)
                             .required(false))
+                        .arg(Arg::with_name("proxy-server")
+                            .short("p")
+                            .long("proxy")
+                            .value_name("IP of Proxy")
+                            .help("IP of the server to proxy requests to in case we did not find a match.")
+                            .takes_value(true)
+                            .required(false)
+                            .default_value("8.8.8.8"))
                         .get_matches();
 
     let zerotier_token = matches.value_of("zerotier-token").unwrap();
     let zerotier_network_id = matches.value_of("zerotier-network-id").unwrap();
     let bind_address = matches.value_of("bind-address").unwrap_or("0.0.0.0");
+    let proxy_ip = matches.value_of("proxy-server").unwrap_or("8.8.8.8");
     let socket = UdpSocket::bind((bind_address, 53)).unwrap();
 
     println!("Started Zerotier-DNS on {}:53", bind_address);
@@ -181,7 +190,25 @@ fn main() {
                     packet.resources.push(rec);
                 }
             } else {
-                packet.header.rescode = ResultCode::ResultCode::SERVFAIL;
+                let server = (proxy_ip, 53);
+                if let Ok(result) = proxy_lookup(&question.name, question.qtype, server) {
+                    packet.questions.push(question.clone());
+                    packet.header.rescode = result.header.rescode;
+
+                    for rec in result.answers {
+                        packet.answers.push(rec);
+                    }
+
+                    for rec in result.authorities {
+                        packet.authorities.push(rec);
+                    }
+
+                    for rec in result.resources {
+                        packet.resources.push(rec);
+                    }
+                } else {
+                    packet.header.rescode = ResultCode::ResultCode::SERVFAIL;
+                }
             }
         }
 
