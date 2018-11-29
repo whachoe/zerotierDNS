@@ -49,8 +49,22 @@ impl BytePacketBuffer {
         Ok(self.buf[pos])
     }
 
+    // Set an 8-bit int at some place in the buffer
+    pub fn set(&mut self, pos: usize, val: u8) -> Result<()> {
+        self.buf[pos] = val;
+        Ok(())
+    }
+
+    // Set a 16-bit int at some place in the buffer
+    pub fn set_u16(&mut self, pos: usize, val: u16) -> Result<()> {
+        self.set(pos, (val >> 8) as u8)?;  // ? is the same as wrapping with try!
+        self.set(pos, (val & 0xFF) as u8)?;
+
+        Ok(())
+    }
+
     // Get multiple bytes at once without changing the internal position
-    fn get_range(&mut self, start:usize, len: usize) -> Result<&[u8]> {
+    pub fn get_range(&mut self, start:usize, len: usize) -> Result<&[u8]> {
         if start + len >= 512 {
             return Err(Error::new(ErrorKind::InvalidInput, "End of buffer"));
         }

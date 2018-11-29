@@ -27,24 +27,24 @@ impl DnsPacket {
 
     pub fn from_buffer(buffer: &mut BytePacketBuffer) -> Result<DnsPacket> {
         let mut result = DnsPacket::new();
-        try!(result.header.read(buffer));
+        result.header.read(buffer)?;
 
         for _ in 0..result.header.questions {
             let mut question = DnsQuestion::new("".to_string(), QueryType::UNKNOWN(0));
-            try!(question.read(buffer));
+            question.read(buffer)?;
             result.questions.push(question);
         }
 
         for _ in 0..result.header.answers {
-            let rec = try!(DnsRecord::read(buffer));
+            let rec = DnsRecord::read(buffer)?;
             result.answers.push(rec);
         }
         for _ in 0..result.header.authoritative_entries {
-            let rec = try!(DnsRecord::read(buffer));
+            let rec = DnsRecord::read(buffer)?;
             result.authorities.push(rec);
         }
         for _ in 0..result.header.resource_entries {
-            let rec = try!(DnsRecord::read(buffer));
+            let rec = DnsRecord::read(buffer)?;
             result.resources.push(rec);
         }
 
@@ -57,22 +57,22 @@ impl DnsPacket {
         self.header.authoritative_entries = self.authorities.len() as u16;
         self.header.resource_entries = self.resources.len() as u16;
 
-        try!(self.header.write(buffer));
+        self.header.write(buffer)?;
 
         for q in &self.questions {
-            try!(q.write(buffer));
+            q.write(buffer)?;
         }
 
         for rec in &self.answers {
-            try!(rec.write(buffer));
+            rec.write(buffer)?;
         }
 
         for rec in &self.authorities {
-            try!(rec.write(buffer));
+            rec.write(buffer)?;
         }
 
         for rec in &self.resources {
-            try!(rec.write(buffer));
+            rec.write(buffer)?;
         }
 
         Ok(())
