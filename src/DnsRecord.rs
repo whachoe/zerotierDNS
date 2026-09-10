@@ -42,6 +42,17 @@ pub enum DnsRecord {
 }
 
 impl DnsRecord {
+    // UNKNOWN records carry no rdata (it's skipped over on read, not stored),
+    // so write() can't serialize them. Callers must drop these before they're
+    // counted into a packet's section counts, or the counts and the actually
+    // written bytes disagree and the resulting packet is malformed.
+    pub fn is_unknown(&self) -> bool {
+        match *self {
+            DnsRecord::UNKNOWN { .. } => true,
+            _ => false
+        }
+    }
+
     pub fn read(buffer: &mut BytePacketBuffer) -> Result<DnsRecord> {
         let mut domain = String::new();
         try!(buffer.read_qname(&mut domain));

@@ -52,6 +52,13 @@ impl DnsPacket {
     }
 
     pub fn write(&mut self, buffer: &mut BytePacketBuffer) -> Result<()> {
+        // Drop records we can't serialize before counting sections, otherwise
+        // the header claims more records than are actually written and the
+        // packet comes out malformed.
+        self.answers.retain(|r| !r.is_unknown());
+        self.authorities.retain(|r| !r.is_unknown());
+        self.resources.retain(|r| !r.is_unknown());
+
         self.header.questions = self.questions.len() as u16;
         self.header.answers = self.answers.len() as u16;
         self.header.authoritative_entries = self.authorities.len() as u16;

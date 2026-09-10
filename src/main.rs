@@ -11,6 +11,12 @@ use std::net::UdpSocket;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::str::FromStr;
+use std::time::Duration;
+
+// Network calls (ZeroTier API request, proxy DNS round-trip) must never block
+// longer than this, otherwise the single-threaded main loop stalls and stops
+// reading further queries off the listening socket.
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
 
 mod BytePacketBuffer;
 mod DnsHeader;
@@ -23,7 +29,10 @@ mod ResultCode;
 // If you want to use this server as a proxy-dns-server to an upstream link, use this function
 #[allow(dead_code)]
 fn proxy_lookup(qname: &str, qtype: QueryType::QueryType, server: (&str, u16)) -> std::io::Result<DnsPacket::DnsPacket> {
+    println!("proxy_lookup: Received query: {:?}", qname);
+
     let socket = UdpSocket::bind(("0.0.0.0", 43210))?;
+    socket.set_read_timeout(Some(NETWORK_TIMEOUT))?;
 
     let mut packet = DnsPacket::DnsPacket::new();
 
@@ -37,7 +46,7 @@ fn proxy_lookup(qname: &str, qtype: QueryType::QueryType, server: (&str, u16)) -
     socket.send_to(&req_buffer.buf[0..req_buffer.pos], server)?;
 
     let mut res_buffer = BytePacketBuffer::BytePacketBuffer::new();
-    socket.recv_from(&mut res_buffer.buf).unwrap();
+    socket.recv_from(&mut res_buffer.buf)?;
 
     DnsPacket::DnsPacket::from_buffer(&mut res_buffer)
 }
@@ -46,17 +55,33 @@ fn proxy_lookup(qname: &str, qtype: QueryType::QueryType, server: (&str, u16)) -
 // todo: Implement local caching of the API-response
 #[allow(dead_code)]
 fn lookup(qname: &str, zerotier_token: &str, zerotier_network_id: &str) -> std::result::Result<DnsPacket::DnsPacket, &'static str> {
+    println!("lookup: Sending query to zerotier: {:?}", qname);
+    
     let zerotier_url = format!("https://my.zerotier.com/api/network/{network_id}/member", network_id = zerotier_network_id);
     let auth_header = format!("Bearer {token}", token = zerotier_token);
 
-    let client = reqwest::Client::new();
-    let mut response = client.get(&zerotier_url).header(AUTHORIZATION, auth_header).send().unwrap();
-    let response_content = response.text().unwrap();
+    let client = match reqwest::Client::builder().timeout(NETWORK_TIMEOUT).build() {
+        Ok(c) => c,
+        Err(_) => return Err("Failed to build HTTP client"),
+    };
+
+    let mut response = match client.get(&zerotier_url).header(AUTHORIZATION, auth_header).send() {
+        Ok(r) => r,
+        Err(_) => return Err("Failed to reach ZeroTier API"),
+    };
+
+    let response_content = match response.text() {
+        Ok(t) => t,
+        Err(_) => return Err("Failed to read ZeroTier API response"),
+    };
 
     // println!("Response: {}", response_content);
 
     // Parse the json
-    let parsed = json::parse(&response_content.to_string()).unwrap();
+    let parsed = match json::parse(&response_content.to_string()) {
+        Ok(p) => p,
+        Err(_) => return Err("Failed to parse ZeroTier API response"),
+    };
     let mut name = String::new();
     let mut ip = String::new();
     let mut found = false;
