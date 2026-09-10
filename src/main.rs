@@ -11,12 +11,15 @@ use std::net::UdpSocket;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // Network calls (ZeroTier API request, proxy DNS round-trip) must never block
 // longer than this, otherwise the single-threaded main loop stalls and stops
 // reading further queries off the listening socket.
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
+
+// How long a fetched ZeroTier member list stays valid before we hit the API again.
+const ZEROTIER_CACHE_DURATION: Duration = Duration::from_secs(1440 * 60);
 
 mod BytePacketBuffer;
 mod DnsHeader;
@@ -51,10 +54,14 @@ fn proxy_lookup(qname: &str, qtype: QueryType::QueryType, server: (&str, u16)) -
     DnsPacket::DnsPacket::from_buffer(&mut res_buffer)
 }
 
+// A previously-fetched ZeroTier member list (name -> IP), plus when it was fetched.
+struct ZerotierCache {
+    fetched_at: Instant,
+    devices: Vec<(String, String)>
+}
+
 // Lookup the qname in zerotier api and return the IP
-// todo: Implement local caching of the API-response
-#[allow(dead_code)]
-fn lookup(qname: &str, qtype: QueryType::QueryType, zerotier_token: &str, zerotier_network_id: &str, custom_domain: &str) -> std::result::Result<DnsPacket::DnsPacket, &'static str> {
+fn lookup(qname: &str, qtype: QueryType::QueryType, zerotier_token: &str, zerotier_network_id: &str, custom_domain: &str, cache: &mut Option<ZerotierCache>) -> std::result::Result<DnsPacket::DnsPacket, &'static str> {
     println!("lookup: Sending query to zerotier: {:?}", qname);
 
     // ZeroTier device names don't include the custom domain hosts are served
@@ -63,48 +70,66 @@ fn lookup(qname: &str, qtype: QueryType::QueryType, zerotier_token: &str, zeroti
     let suffix = format!(".{}", custom_domain.to_lowercase());
     let device_name = qname.strip_suffix(&suffix).unwrap_or(qname);
 
-    let zerotier_url = format!("https://my.zerotier.com/api/network/{network_id}/member", network_id = zerotier_network_id);
-    let auth_header = format!("Bearer {token}", token = zerotier_token);
-
-    let client = match reqwest::Client::builder().timeout(NETWORK_TIMEOUT).build() {
-        Ok(c) => c,
-        Err(_) => return Err("Failed to build HTTP client"),
+    let needs_refresh = match cache {
+        Some(c) => c.fetched_at.elapsed() >= ZEROTIER_CACHE_DURATION,
+        None => true
     };
 
-    let mut response = match client.get(&zerotier_url).header(AUTHORIZATION, auth_header).send() {
-        Ok(r) => r,
-        Err(_) => return Err("Failed to reach ZeroTier API"),
-    };
+    if needs_refresh {
+        println!("lookup: ZeroTier cache missing or expired, refreshing from API");
 
-    let response_content = match response.text() {
-        Ok(t) => t,
-        Err(_) => return Err("Failed to read ZeroTier API response"),
-    };
+        let zerotier_url = format!("https://my.zerotier.com/api/network/{network_id}/member", network_id = zerotier_network_id);
+        let auth_header = format!("Bearer {token}", token = zerotier_token);
 
-    // println!("Response: {}", response_content);
+        let client = match reqwest::Client::builder().timeout(NETWORK_TIMEOUT).build() {
+            Ok(c) => c,
+            Err(_) => return Err("Failed to build HTTP client"),
+        };
 
-    // Parse the json
-    let parsed = match json::parse(&response_content.to_string()) {
-        Ok(p) => p,
-        Err(_) => return Err("Failed to parse ZeroTier API response"),
-    };
-    let mut name = String::new();
+        let mut response = match client.get(&zerotier_url).header(AUTHORIZATION, auth_header).send() {
+            Ok(r) => r,
+            Err(_) => return Err("Failed to reach ZeroTier API"),
+        };
+
+        let response_content = match response.text() {
+            Ok(t) => t,
+            Err(_) => return Err("Failed to read ZeroTier API response"),
+        };
+
+        // Parse the json
+        let parsed = match json::parse(&response_content.to_string()) {
+            Ok(p) => p,
+            Err(_) => return Err("Failed to parse ZeroTier API response"),
+        };
+
+        let mut devices = Vec::new();
+        if parsed.is_array() {
+            for device in parsed.members() {
+                if device.is_object() {
+                    let name = device["name"].to_string();
+                    let ip = device["config"]["ipAssignments"][0].to_string();
+                    devices.push((name, ip));
+                }
+            }
+        }
+
+        *cache = Some(ZerotierCache { fetched_at: Instant::now(), devices });
+    } else {
+        println!("lookup: Using cached ZeroTier device list");
+    }
+
+    let devices = &cache.as_ref().unwrap().devices;
     let mut ip = String::new();
     let mut found = false;
 
-    if parsed.is_array() {
-        for device in parsed.members() {
-            if device.is_object() {
-                name = device["name"].to_string();
-                ip = device["config"]["ipAssignments"][0].to_string();
-                println!("Found: {} -> {}", name, ip);
+    for (name, device_ip) in devices {
+        println!("Found: {} -> {}", name, device_ip);
 
-                if name.eq(device_name) {
-                    println!("Matched: {} -> {}", name, ip);
-                    found = true;
-                    break;
-                }
-            }
+        if name.eq(device_name) {
+            println!("Matched: {} -> {}", name, device_ip);
+            ip = device_ip.clone();
+            found = true;
+            break;
         }
     }
 
@@ -181,6 +206,7 @@ fn main() {
     let custom_domain = matches.value_of("custom-domain").unwrap_or("localdomain");
     let proxy_ip = matches.value_of("proxy-server").unwrap_or("8.8.8.8");
     let socket = UdpSocket::bind((bind_address, 53)).unwrap();
+    let mut zerotier_cache: Option<ZerotierCache> = None;
 
     println!("Started Zerotier-DNS on {}:53", bind_address);
 
@@ -220,7 +246,7 @@ fn main() {
             println!("Received query: {:?}", question);
 
             // Forward query to the target server and parse the answer
-            if let Ok(result) = lookup(&question.name, question.qtype, zerotier_token, zerotier_network_id, custom_domain) {
+            if let Ok(result) = lookup(&question.name, question.qtype, zerotier_token, zerotier_network_id, custom_domain, &mut zerotier_cache) {
                 packet.questions.push(question.clone());
                 packet.header.rescode = result.header.rescode;
 
