@@ -54,9 +54,15 @@ fn proxy_lookup(qname: &str, qtype: QueryType::QueryType, server: (&str, u16)) -
 // Lookup the qname in zerotier api and return the IP
 // todo: Implement local caching of the API-response
 #[allow(dead_code)]
-fn lookup(qname: &str, zerotier_token: &str, zerotier_network_id: &str) -> std::result::Result<DnsPacket::DnsPacket, &'static str> {
+fn lookup(qname: &str, qtype: QueryType::QueryType, zerotier_token: &str, zerotier_network_id: &str, custom_domain: &str) -> std::result::Result<DnsPacket::DnsPacket, &'static str> {
     println!("lookup: Sending query to zerotier: {:?}", qname);
-    
+
+    // ZeroTier device names don't include the custom domain hosts are served
+    // under (e.g. "cjmini" vs. the queried "cjmini.localdomain"), so strip it
+    // before matching against the API's device list.
+    let suffix = format!(".{}", custom_domain.to_lowercase());
+    let device_name = qname.strip_suffix(&suffix).unwrap_or(qname);
+
     let zerotier_url = format!("https://my.zerotier.com/api/network/{network_id}/member", network_id = zerotier_network_id);
     let auth_header = format!("Bearer {token}", token = zerotier_token);
 
@@ -93,7 +99,7 @@ fn lookup(qname: &str, zerotier_token: &str, zerotier_network_id: &str) -> std::
                 ip = device["config"]["ipAssignments"][0].to_string();
                 println!("Found: {} -> {}", name, ip);
 
-                if name.eq(qname) {
+                if name.eq(device_name) {
                     println!("Matched: {} -> {}", name, ip);
                     found = true;
                     break;
@@ -105,13 +111,19 @@ fn lookup(qname: &str, zerotier_token: &str, zerotier_network_id: &str) -> std::
     let mut packet = DnsPacket::DnsPacket::new();
 
     if found {
-        let record = DnsRecord::DnsRecord::A {
-            domain: name,
-            addr: Ipv4Addr::from_str(&ip).unwrap(),
-            ttl: 3600
-        };
-        packet.header.answers = 1;
-        packet.answers.push(record);
+        // We're authoritative for this name, so answer even if there's no
+        // record of the requested type (NODATA) rather than falling through
+        // to the proxy or returning a record whose type doesn't match the
+        // question - either of which resolvers correctly reject/mishandle.
+        if qtype == QueryType::QueryType::A {
+            let record = DnsRecord::DnsRecord::A {
+                domain: qname.to_string(),
+                addr: Ipv4Addr::from_str(&ip).unwrap(),
+                ttl: 3600
+            };
+            packet.header.answers = 1;
+            packet.answers.push(record);
+        }
 
         return Ok(packet)
     }
@@ -138,6 +150,13 @@ fn main() {
                             .help("The Network ID of your zerotier-network")
                             .required(true)
                             .takes_value(true))
+                        .arg(Arg::with_name("custom-domain")
+                            .short("d")
+                            .long("domain")
+                            .value_name("example.com")
+                            .help("The domain you want your hosts to be resolved under")
+                            .takes_value(true)
+                            .default_value("localdomain"))
                         .arg(Arg::with_name("bind-address")
                             .short("b")
                             .long("bind")
@@ -153,11 +172,13 @@ fn main() {
                             .takes_value(true)
                             .required(false)
                             .default_value("8.8.8.8"))
+
                         .get_matches();
 
     let zerotier_token = matches.value_of("zerotier-token").unwrap();
     let zerotier_network_id = matches.value_of("zerotier-network-id").unwrap();
     let bind_address = matches.value_of("bind-address").unwrap_or("0.0.0.0");
+    let custom_domain = matches.value_of("custom-domain").unwrap_or("localdomain");
     let proxy_ip = matches.value_of("proxy-server").unwrap_or("8.8.8.8");
     let socket = UdpSocket::bind((bind_address, 53)).unwrap();
 
@@ -199,7 +220,7 @@ fn main() {
             println!("Received query: {:?}", question);
 
             // Forward query to the target server and parse the answer
-            if let Ok(result) = lookup(&question.name, zerotier_token, zerotier_network_id) {
+            if let Ok(result) = lookup(&question.name, question.qtype, zerotier_token, zerotier_network_id, custom_domain) {
                 packet.questions.push(question.clone());
                 packet.header.rescode = result.header.rescode;
 
